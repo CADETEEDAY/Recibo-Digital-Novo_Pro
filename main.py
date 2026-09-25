@@ -13,10 +13,11 @@ from kivy.uix.button import Button
 from kivy.uix.popup import Popup
 from kivy.core.window import Window
 
-Window.clearcolor = (0.07, 0.09, 0.14, 1)  # Tema Slate Dark (#121824)
+# Fundo escuro corporativo (Slate Dark)
+Window.clearcolor = (0.07, 0.09, 0.14, 1)
 
 # ==============================================================================
-# SEGURANÇA E BASE DE DADOS
+# SEGURANÇA (PBKDF2-HMAC-SHA256) E BASE DE DADOS
 # ==============================================================================
 class SecurityHelper:
     @staticmethod
@@ -66,8 +67,10 @@ class DatabaseManager:
             total_users = c.execute("SELECT COUNT(id) FROM usuarios").fetchone()[0]
             if total_users == 0:
                 h, s = SecurityHelper.gerar_hash("admin123")
-                c.execute("INSERT INTO usuarios (usuario, senha_hash, salt, nome_completo, perfil) VALUES (?, ?, ?, ?, ?)",
-                          ("admin", h, s, "Administrador Geral", "ADMIN"))
+                c.execute("""
+                    INSERT INTO usuarios (usuario, senha_hash, salt, nome_completo, perfil)
+                    VALUES (?, ?, ?, ?, ?)
+                """, ("admin", h, s, "Administrador Geral", "ADMIN"))
             conn.commit()
 
     def autenticar(self, usuario, senha):
@@ -78,14 +81,14 @@ class DatabaseManager:
         return None
 
 # ==============================================================================
-# INTERFACE MÓVEL (KIVY)
+# COMPONENTES E JANELAS (KIVY)
 # ==============================================================================
 def popup_aviso(titulo, mensagem):
     box = BoxLayout(orientation='vertical', padding=15, spacing=10)
     box.add_widget(Label(text=mensagem, font_size=14))
     btn = Button(text="Fechar", size_hint=(1, 0.4), background_color=(0.23, 0.51, 0.96, 1))
     box.add_widget(btn)
-    p = Popup(title=titulo, content=box, size_hint=(0.8, 0.4))
+    p = Popup(title=titulo, content=box, size_hint=(0.85, 0.4))
     btn.bind(on_release=p.dismiss)
     p.open()
 
@@ -95,7 +98,7 @@ class LoginScreen(Screen):
         layout = BoxLayout(orientation='vertical', padding=25, spacing=15)
 
         layout.add_widget(Label(text="RECIBO SOFTWARE", font_size=24, bold=True, color=(1, 1, 1, 1), size_hint=(1, 0.2)))
-        layout.add_widget(Label(text="Acesso Móvel", font_size=14, color=(0.4, 0.6, 1, 1), size_hint=(1, 0.1)))
+        layout.add_widget(Label(text="Acesso Móvel Seguro", font_size=14, color=(0.4, 0.6, 1, 1), size_hint=(1, 0.1)))
 
         self.txt_user = TextInput(hint_text="Utilizador (ex: admin)", text="admin", multiline=False, size_hint=(1, 0.12))
         layout.add_widget(self.txt_user)
@@ -107,7 +110,7 @@ class LoginScreen(Screen):
         btn_entrar.bind(on_release=self.fazer_login)
         layout.add_widget(btn_entrar)
 
-        layout.add_widget(Label(text="Padrão: admin | admin123", font_size=12, color=(0.6, 0.6, 0.6, 1), size_hint=(1, 0.1)))
+        layout.add_widget(Label(text="Acesso inicial: admin | admin123", font_size=12, color=(0.6, 0.6, 0.6, 1), size_hint=(1, 0.1)))
         self.add_widget(layout)
 
     def fazer_login(self, *args):
@@ -117,12 +120,12 @@ class LoginScreen(Screen):
             app.usuario_logado = user
             self.manager.current = "menu"
         else:
-            popup_aviso("Erro", "Utilizador ou palavra-passe inválidos.")
+            popup_aviso("Erro de Acesso", "Utilizador ou palavra-passe inválidos.")
 
 class MenuScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.layout = BoxLayout(orientation='vertical', padding=20, spacing=15)
+        self.layout = BoxLayout(orientation='vertical', padding=20, spacing=14)
         self.add_widget(self.layout)
 
     def on_pre_enter(self):
@@ -140,7 +143,7 @@ class MenuScreen(Screen):
         btn_listar.bind(on_release=lambda x: setattr(self.manager, 'current', 'lista'))
         self.layout.add_widget(btn_listar)
 
-        # Funcionalidade restrita exclusivamente ao Administrador
+        # Gestão de utilizadores visível exclusivamente para ADMIN
         if user["perfil"] == "ADMIN":
             btn_admin_users = Button(text="👤 Gerir Utilizadores (Admin)", size_hint=(1, 0.15), background_color=(0.06, 0.72, 0.5, 1))
             btn_admin_users.bind(on_release=lambda x: setattr(self.manager, 'current', 'usuarios'))
@@ -160,7 +163,7 @@ class ReciboScreen(Screen):
         self.txt_cli = TextInput(hint_text="Nome do Cliente / Beneficiário", multiline=False, size_hint=(1, 0.12))
         layout.add_widget(self.txt_cli)
 
-        self.txt_val = TextInput(hint_text="Valor (ex: 150.00)", multiline=False, size_hint=(1, 0.12))
+        self.txt_val = TextInput(hint_text="Valor (ex: 250.00)", multiline=False, size_hint=(1, 0.12))
         layout.add_widget(self.txt_val)
 
         self.txt_ref = TextInput(hint_text="Referente a...", multiline=False, size_hint=(1, 0.12))
@@ -188,15 +191,17 @@ class ReciboScreen(Screen):
         try:
             val_f = float(val.replace(',', '.'))
         except ValueError:
-            popup_aviso("Erro", "Valor inválido.")
+            popup_aviso("Erro", "Valor introduzido é inválido.")
             return
 
         app = App.get_running_app()
         dt = datetime.now().strftime("%d/%m/%Y")
         with app.db.get_connection() as conn:
             num = str(conn.execute("SELECT COUNT(id) FROM recibos").fetchone()[0] + 1)
-            conn.execute("INSERT INTO recibos (numero, cliente_nome, valor, referente, data_recibo) VALUES (?, ?, ?, ?, ?)",
-                         (num, cli, val_f, ref, dt))
+            conn.execute("""
+                INSERT INTO recibos (numero, cliente_nome, valor, referente, data_recibo)
+                VALUES (?, ?, ?, ?, ?)
+            """, (num, cli, val_f, ref, dt))
             conn.commit()
 
         self.txt_cli.text = ""
@@ -217,7 +222,7 @@ class ListaRecibosScreen(Screen):
         btn_voltar = Button(text="Voltar ao Menu", size_hint=(1, 0.12), background_color=(0.3, 0.4, 0.5, 1))
         btn_voltar.bind(on_release=lambda x: setattr(self.manager, 'current', 'menu'))
 
-        self.layout.add_widget(Label(text="Recibos Emitidos (A-Z)", font_size=16, bold=True, size_hint=(1, 0.08)))
+        self.layout.add_widget(Label(text="Recibos Emitidos (Ordem A-Z)", font_size=16, bold=True, size_hint=(1, 0.08)))
         self.layout.add_widget(self.scroll)
         self.layout.add_widget(btn_voltar)
         self.add_widget(self.layout)
@@ -229,7 +234,7 @@ class ListaRecibosScreen(Screen):
             registos = conn.execute("SELECT * FROM recibos ORDER BY cliente_nome ASC").fetchall()
 
         if not registos:
-            self.grid.add_widget(Label(text="Nenhum recibo emitido.", size_hint_y=None, height=40))
+            self.grid.add_widget(Label(text="Nenhum recibo registado.", size_hint_y=None, height=40))
         for r in registos:
             txt = f"Nº {r['numero']} - {r['cliente_nome']} | R$ {r['valor']:.2f}\nData: {r['data_recibo']} | Ref: {r['referente']}"
             lbl = Label(text=txt, size_hint_y=None, height=65, color=(0.85, 0.9, 1, 1))
@@ -265,15 +270,17 @@ class UsuariosAdminScreen(Screen):
         u = self.txt_u.text.strip()
         p = self.txt_p.text.strip()
         if not n or not u or not p:
-            popup_aviso("Aviso", "Preencha todos os campos.")
+            popup_aviso("Aviso", "Preencha todos os campos do utilizador.")
             return
 
         app = App.get_running_app()
         h, s = SecurityHelper.gerar_hash(p)
         try:
             with app.db.get_connection() as conn:
-                conn.execute("INSERT INTO usuarios (usuario, senha_hash, salt, nome_completo, perfil) VALUES (?, ?, ?, ?, ?)",
-                             (u, h, s, n, "OPERADOR"))
+                conn.execute("""
+                    INSERT INTO usuarios (usuario, senha_hash, salt, nome_completo, perfil)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (u, h, s, n, "OPERADOR"))
                 conn.commit()
             self.txt_nome.text = ""
             self.txt_u.text = ""
@@ -284,7 +291,7 @@ class UsuariosAdminScreen(Screen):
             popup_aviso("Erro", "Nome de utilizador já existente.")
 
 # ==============================================================================
-# INICIALIZAÇÃO DA APLICAÇÃO
+# INICIALIZAÇÃO DA APLICAÇÃO MÓVEL
 # ==============================================================================
 class ReciboSoftwareMobileApp(App):
     def build(self):
