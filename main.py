@@ -1397,4 +1397,13 @@ class ReciboSoftwareApp(ctk.CTk):
 
             modal.destroy()
             total = sum(r["valor"] for r in registros)
-            linhas = "".join([f"
+            
+            linhas_lista = []
+            for r in registros:
+                col_num = str(r['numero'])
+                col_dt = str(r['data_recibo'])
+                col_tipo = str(r['tipo'])
+                col_cli = str(r['cliente_nome'])
+                col_ref = str(r['referente'])
+                col_val = f"R$ {r['valor']:,.2f}"
+                linhas_lista.append(f"
