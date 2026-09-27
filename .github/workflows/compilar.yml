@@ -1,4 +1,4 @@
-name: Compilar Recibo Software Windows
+name: Compilar Recibo Software Windows 
 
 on:
   push:
