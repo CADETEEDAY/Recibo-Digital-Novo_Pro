@@ -1,38 +1,87 @@
+import os
+import shutil
 import sqlite3
+import tempfile
+import webbrowser
+import base64
+import json
 import hashlib
 import secrets
 from datetime import datetime
-from kivy.app import App
-from kivy.uix.screenmanager import ScreenManager, Screen
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.label import Label
-from kivy.uix.textinput import TextInput
-from kivy.uix.button import Button
-from kivy.uix.popup import Popup
-from kivy.core.window import Window
+from PIL import Image
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
 
-# Fundo escuro corporativo (Slate Dark)
-Window.clearcolor = (0.07, 0.09, 0.14, 1)
+# Configurações de Aparência
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
 
 # ==============================================================================
-# SEGURANÇA (PBKDF2-HMAC-SHA256) E BASE DE DADOS
+# PALETA VISUAL (macOS / SaaS Enterprise Dark)
+# ==============================================================================
+THEME = {
+    "bg_app": "#121824",
+    "sidebar": "#161e2e",
+    "topbar": "#182132",
+    "card_main": "#1b2438",
+    "card_border": "#28344e",
+    "card_right": "#182133",
+    "input_bg": "#151c2c",
+    "input_border": "#2a3752",
+    "input_focus": "#3b82f6",
+    "nav_active": "#ff6363",
+    "nav_active_text": "#ffffff",
+    "nav_idle": "transparent",
+    "nav_idle_text": "#8e9bb2",
+    "accent_blue": "#3b82f6",
+    "accent_indigo": "#4f46e5",
+    "accent_emerald": "#10b981",
+    "accent_emerald_bg": "#064e3b",
+    "text_primary": "#f8fafc",
+    "text_muted": "#8a97ae",
+    "traffic_red": "#ff5f56",
+    "traffic_yellow": "#ffbd2e",
+    "traffic_green": "#27c93f",
+    
+    # Botões Circulares de Ação
+    "btn_circle_add": "#3a445d",
+    "btn_circle_add_hover": "#4a5676",
+    "btn_circle_add_icon": "#d8e1f5",
+    "btn_circle_edit": "#544a53",
+    "btn_circle_edit_hover": "#695c68",
+    "btn_circle_edit_icon": "#eedee8",
+    "btn_circle_del": "#6e454f",
+    "btn_circle_del_hover": "#865460",
+    "btn_circle_del_icon": "#ffd6dc",
+    "btn_circle_search": "#3e475d",
+    "btn_circle_search_hover": "#4e5975",
+    "btn_circle_search_icon": "#d8e1f5"
+}
+
+# ==============================================================================
+# CRIPTOGRAFIA DE SENHAS
 # ==============================================================================
 class SecurityHelper:
     @staticmethod
     def gerar_hash(senha: str) -> tuple:
         salt = secrets.token_hex(16)
-        senha_hash = hashlib.pbkdf2_hmac("sha256", senha.encode("utf-8"), salt.encode("utf-8"), 100000).hex()
+        senha_hash = hashlib.pbkdf2_hmac(
+            "sha256", senha.encode("utf-8"), salt.encode("utf-8"), 100000
+        ).hex()
         return senha_hash, salt
 
     @staticmethod
     def verificar_senha(senha: str, hash_salvo: str, salt: str) -> bool:
-        teste_hash = hashlib.pbkdf2_hmac("sha256", senha.encode("utf-8"), salt.encode("utf-8"), 100000).hex()
+        teste_hash = hashlib.pbkdf2_hmac(
+            "sha256", senha.encode("utf-8"), salt.encode("utf-8"), 100000
+        ).hex()
         return secrets.compare_digest(hash_salvo, teste_hash)
 
+# ==============================================================================
+# BASE DE DADOS (SQLite WAL Mode)
+# ==============================================================================
 class DatabaseManager:
-    def __init__(self, db_name="recibo_mobile.db"):
+    def __init__(self, db_name="recibo_software.db"):
         self.db_path = db_name
         self._init_db()
 
@@ -44,6 +93,8 @@ class DatabaseManager:
     def _init_db(self):
         with self.get_connection() as conn:
             c = conn.cursor()
+            c.execute("PRAGMA journal_mode=WAL;")
+            
             c.execute("""
                 CREATE TABLE IF NOT EXISTS usuarios (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,19 +102,57 @@ class DatabaseManager:
                     senha_hash TEXT NOT NULL,
                     salt TEXT NOT NULL,
                     nome_completo TEXT NOT NULL,
-                    perfil TEXT NOT NULL
+                    perfil TEXT NOT NULL,
+                    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
             c.execute("""
                 CREATE TABLE IF NOT EXISTS recibos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tipo TEXT NOT NULL,
                     numero TEXT NOT NULL,
                     cliente_nome TEXT NOT NULL,
-                    valor REAL NOT NULL,
+                    cliente_doc TEXT,
                     referente TEXT NOT NULL,
-                    data_recibo TEXT NOT NULL
+                    data_recibo TEXT NOT NULL,
+                    valor REAL NOT NULL,
+                    emitente_nome TEXT,
+                    emitente_doc TEXT,
+                    emitente_cidade TEXT,
+                    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS clientes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nome TEXT NOT NULL,
+                    tipo_pessoa TEXT,
+                    cpf TEXT,
+                    cnpj TEXT,
+                    email TEXT,
+                    data_nasc TEXT,
+                    tel1 TEXT,
+                    tel2 TEXT,
+                    endereco TEXT,
+                    bairro TEXT,
+                    cidade TEXT,
+                    estado TEXT,
+                    cep TEXT,
+                    obs TEXT,
+                    status TEXT DEFAULT 'ATIVO',
+                    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS configuracoes (
+                    chave TEXT PRIMARY KEY,
+                    valor TEXT
+                )
+            """)
+            
             total_users = c.execute("SELECT COUNT(id) FROM usuarios").fetchone()[0]
             if total_users == 0:
                 h, s = SecurityHelper.gerar_hash("admin123")
@@ -71,6 +160,7 @@ class DatabaseManager:
                     INSERT INTO usuarios (usuario, senha_hash, salt, nome_completo, perfil)
                     VALUES (?, ?, ?, ?, ?)
                 """, ("admin", h, s, "Administrador Geral", "ADMIN"))
+                
             conn.commit()
 
     def autenticar(self, usuario, senha):
@@ -80,231 +170,1231 @@ class DatabaseManager:
                 return dict(user)
         return None
 
-# ==============================================================================
-# COMPONENTES E JANELAS (KIVY)
-# ==============================================================================
-def popup_aviso(titulo, mensagem):
-    box = BoxLayout(orientation='vertical', padding=15, spacing=10)
-    box.add_widget(Label(text=mensagem, font_size=14))
-    btn = Button(text="Fechar", size_hint=(1, 0.4), background_color=(0.23, 0.51, 0.96, 1))
-    box.add_widget(btn)
-    p = Popup(title=titulo, content=box, size_hint=(0.85, 0.4))
-    btn.bind(on_release=p.dismiss)
-    p.open()
-
-class LoginScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        layout = BoxLayout(orientation='vertical', padding=25, spacing=15)
-
-        layout.add_widget(Label(text="RECIBO SOFTWARE", font_size=24, bold=True, color=(1, 1, 1, 1), size_hint=(1, 0.2)))
-        layout.add_widget(Label(text="Acesso Móvel Seguro", font_size=14, color=(0.4, 0.6, 1, 1), size_hint=(1, 0.1)))
-
-        self.txt_user = TextInput(hint_text="Utilizador (ex: admin)", text="admin", multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_user)
-
-        self.txt_pass = TextInput(hint_text="Palavra-passe", text="admin123", password=True, multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_pass)
-
-        btn_entrar = Button(text="Entrar no Sistema", font_size=16, bold=True, size_hint=(1, 0.15), background_color=(0.23, 0.51, 0.96, 1))
-        btn_entrar.bind(on_release=self.fazer_login)
-        layout.add_widget(btn_entrar)
-
-        layout.add_widget(Label(text="Acesso inicial: admin | admin123", font_size=12, color=(0.6, 0.6, 0.6, 1), size_hint=(1, 0.1)))
-        self.add_widget(layout)
-
-    def fazer_login(self, *args):
-        app = App.get_running_app()
-        user = app.db.autenticar(self.txt_user.text, self.txt_pass.text)
-        if user:
-            app.usuario_logado = user
-            self.manager.current = "menu"
-        else:
-            popup_aviso("Erro de Acesso", "Utilizador ou palavra-passe inválidos.")
-
-class MenuScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.layout = BoxLayout(orientation='vertical', padding=20, spacing=14)
-        self.add_widget(self.layout)
-
-    def on_pre_enter(self):
-        self.layout.clear_widgets()
-        app = App.get_running_app()
-        user = app.usuario_logado or {"nome_completo": "Operador", "perfil": "USER"}
-
-        self.layout.add_widget(Label(text=f"Sessão: {user['nome_completo']} ({user['perfil']})", font_size=16, bold=True, size_hint=(1, 0.15)))
-
-        btn_novo_recibo = Button(text="📄 Emitir Novo Recibo", size_hint=(1, 0.15), background_color=(0.23, 0.51, 0.96, 1))
-        btn_novo_recibo.bind(on_release=lambda x: setattr(self.manager, 'current', 'recibo'))
-        self.layout.add_widget(btn_novo_recibo)
-
-        btn_listar = Button(text="🔍 Listar Recibos (A-Z)", size_hint=(1, 0.15), background_color=(0.3, 0.4, 0.6, 1))
-        btn_listar.bind(on_release=lambda x: setattr(self.manager, 'current', 'lista'))
-        self.layout.add_widget(btn_listar)
-
-        # Gestão de utilizadores visível exclusivamente para ADMIN
-        if user["perfil"] == "ADMIN":
-            btn_admin_users = Button(text="👤 Gerir Utilizadores (Admin)", size_hint=(1, 0.15), background_color=(0.06, 0.72, 0.5, 1))
-            btn_admin_users.bind(on_release=lambda x: setattr(self.manager, 'current', 'usuarios'))
-            self.layout.add_widget(btn_admin_users)
-
-        btn_sair = Button(text="Sair da Conta", size_hint=(1, 0.15), background_color=(0.7, 0.2, 0.2, 1))
-        btn_sair.bind(on_release=lambda x: setattr(self.manager, 'current', 'login'))
-        self.layout.add_widget(btn_sair)
-
-class ReciboScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        layout = BoxLayout(orientation='vertical', padding=15, spacing=10)
-
-        layout.add_widget(Label(text="Emissão de Recibo", font_size=18, bold=True, size_hint=(1, 0.1)))
-
-        self.txt_cli = TextInput(hint_text="Nome do Cliente / Beneficiário", multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_cli)
-
-        self.txt_val = TextInput(hint_text="Valor (ex: 250.00)", multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_val)
-
-        self.txt_ref = TextInput(hint_text="Referente a...", multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_ref)
-
-        btn_gravar = Button(text="Gravar Recibo", size_hint=(1, 0.14), background_color=(0.06, 0.72, 0.5, 1))
-        btn_gravar.bind(on_release=self.gravar_recibo)
-        layout.add_widget(btn_gravar)
-
-        btn_voltar = Button(text="Voltar ao Menu", size_hint=(1, 0.12), background_color=(0.3, 0.4, 0.5, 1))
-        btn_voltar.bind(on_release=lambda x: setattr(self.manager, 'current', 'menu'))
-        layout.add_widget(btn_voltar)
-
-        self.add_widget(layout)
-
-    def gravar_recibo(self, *args):
-        cli = self.txt_cli.text.strip()
-        val = self.txt_val.text.strip()
-        ref = self.txt_ref.text.strip()
-
-        if not cli or not val:
-            popup_aviso("Aviso", "Preencha o cliente e o valor.")
-            return
-
-        try:
-            val_f = float(val.replace(',', '.'))
-        except ValueError:
-            popup_aviso("Erro", "Valor introduzido é inválido.")
-            return
-
-        app = App.get_running_app()
-        dt = datetime.now().strftime("%d/%m/%Y")
-        with app.db.get_connection() as conn:
-            num = str(conn.execute("SELECT COUNT(id) FROM recibos").fetchone()[0] + 1)
+    def cadastrar_usuario(self, usuario, senha, nome, perfil="OPERADOR"):
+        h, s = SecurityHelper.gerar_hash(senha)
+        with self.get_connection() as conn:
             conn.execute("""
-                INSERT INTO recibos (numero, cliente_nome, valor, referente, data_recibo)
+                INSERT INTO usuarios (usuario, senha_hash, salt, nome_completo, perfil)
                 VALUES (?, ?, ?, ?, ?)
-            """, (num, cli, val_f, ref, dt))
+            """, (usuario.strip(), h, s, nome.strip(), perfil))
             conn.commit()
 
-        self.txt_cli.text = ""
-        self.txt_val.text = ""
-        self.txt_ref.text = ""
-        popup_aviso("Sucesso", f"Recibo Nº {num} registado com sucesso.")
-        self.manager.current = "menu"
+    def listar_usuarios(self):
+        with self.get_connection() as conn:
+            return conn.execute("SELECT id, usuario, nome_completo, perfil, criado_em FROM usuarios ORDER BY id ASC").fetchall()
 
-class ListaRecibosScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.layout = BoxLayout(orientation='vertical', padding=10, spacing=8)
-        self.scroll = ScrollView(size_hint=(1, 0.85))
-        self.grid = GridLayout(cols=1, spacing=6, size_hint_y=None)
-        self.grid.bind(minimum_height=self.grid.setter('height'))
-        self.scroll.add_widget(self.grid)
+    def excluir_usuario(self, user_id):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM usuarios WHERE id = ?", (user_id,))
+            conn.commit()
 
-        btn_voltar = Button(text="Voltar ao Menu", size_hint=(1, 0.12), background_color=(0.3, 0.4, 0.5, 1))
-        btn_voltar.bind(on_release=lambda x: setattr(self.manager, 'current', 'menu'))
+    def set_config(self, chave, valor):
+        with self.get_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO configuracoes (chave, valor) VALUES (?, ?)", (chave, valor))
+            conn.commit()
 
-        self.layout.add_widget(Label(text="Recibos Emitidos (Ordem A-Z)", font_size=16, bold=True, size_hint=(1, 0.08)))
-        self.layout.add_widget(self.scroll)
-        self.layout.add_widget(btn_voltar)
-        self.add_widget(self.layout)
+    def get_config(self, chave, default=""):
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT valor FROM configuracoes WHERE chave = ?", (chave,)).fetchone()
+            return row["valor"] if row else default
 
-    def on_pre_enter(self):
-        self.grid.clear_widgets()
-        app = App.get_running_app()
-        with app.db.get_connection() as conn:
-            registos = conn.execute("SELECT * FROM recibos ORDER BY cliente_nome ASC").fetchall()
+    def get_proximo_numero_recibo(self):
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT COUNT(id) AS total FROM recibos").fetchone()
+            return str((row["total"] if row else 0) + 1)
 
-        if not registos:
-            self.grid.add_widget(Label(text="Nenhum recibo registado.", size_hint_y=None, height=40))
-        for r in registos:
-            txt = f"Nº {r['numero']} - {r['cliente_nome']} | R$ {r['valor']:.2f}\nData: {r['data_recibo']} | Ref: {r['referente']}"
-            lbl = Label(text=txt, size_hint_y=None, height=65, color=(0.85, 0.9, 1, 1))
-            self.grid.add_widget(lbl)
+    def total_clientes(self):
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT COUNT(id) as total FROM clientes").fetchone()
+            return row["total"] if row else 0
 
-class UsuariosAdminScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        layout = BoxLayout(orientation='vertical', padding=15, spacing=10)
-        layout.add_widget(Label(text="Adicionar Utilizador (Admin)", font_size=16, bold=True, size_hint=(1, 0.1)))
+    def ultimos_recibos(self, limite=3):
+        with self.get_connection() as conn:
+            return conn.execute("SELECT * FROM recibos ORDER BY id DESC LIMIT ?", (limite,)).fetchall()
 
-        self.txt_nome = TextInput(hint_text="Nome Completo", multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_nome)
+    def buscar_recibos(self, nome_termo="", ordem="alfabetica_az"):
+        query = "SELECT * FROM recibos WHERE cliente_nome LIKE ? OR numero LIKE ?"
+        ordens = {
+            "alfabetica_az": " ORDER BY cliente_nome ASC",
+            "alfabetica_za": " ORDER BY cliente_nome DESC",
+            "data_recente": " ORDER BY id DESC",
+            "data_antiga": " ORDER BY id ASC"
+        }
+        query += ordens.get(ordem, " ORDER BY cliente_nome ASC")
+        with self.get_connection() as conn:
+            param = f"%{nome_termo}%"
+            return conn.execute(query, (param, param)).fetchall()
 
-        self.txt_u = TextInput(hint_text="Nome de Utilizador", multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_u)
+    def exportar_backup_nuvem_json(self):
+        with self.get_connection() as conn:
+            recibos = [dict(r) for r in conn.execute("SELECT * FROM recibos").fetchall()]
+            clientes = [dict(c) for c in conn.execute("SELECT * FROM clientes").fetchall()]
+            configs = [dict(cfg) for cfg in conn.execute("SELECT * FROM configuracoes").fetchall()]
 
-        self.txt_p = TextInput(hint_text="Palavra-passe", password=True, multiline=False, size_hint=(1, 0.12))
-        layout.add_widget(self.txt_p)
+        return {
+            "app": "Recibo Software Pro",
+            "versao": "2.8",
+            "sincronizado_em": datetime.now().isoformat(),
+            "recibos": recibos,
+            "clientes": clientes,
+            "configuracoes": configs
+        }
 
-        btn_criar = Button(text="+ Criar Operador", size_hint=(1, 0.14), background_color=(0.06, 0.72, 0.5, 1))
-        btn_criar.bind(on_release=self.adicionar_usuario)
-        layout.add_widget(btn_criar)
+    def importar_backup_nuvem_json(self, payload):
+        with self.get_connection() as conn:
+            c = conn.cursor()
+            for rec in payload.get("recibos", []):
+                c.execute("""
+                    INSERT OR IGNORE INTO recibos (id, tipo, numero, cliente_nome, cliente_doc, referente, data_recibo, valor, emitente_nome, emitente_doc, emitente_cidade)
+                    VALUES (:id, :tipo, :numero, :cliente_nome, :cliente_doc, :referente, :data_recibo, :valor, :emitente_nome, :emitente_doc, :emitente_cidade)
+                """, rec)
 
-        btn_voltar = Button(text="Voltar ao Menu", size_hint=(1, 0.12), background_color=(0.3, 0.4, 0.5, 1))
-        btn_voltar.bind(on_release=lambda x: setattr(self.manager, 'current', 'menu'))
-        layout.add_widget(btn_voltar)
+            for cli in payload.get("clientes", []):
+                c.execute("""
+                    INSERT OR IGNORE INTO clientes (id, nome, tipo_pessoa, cpf, cnpj, email, data_nasc, tel1, tel2, endereco, bairro, cidade, estado, cep, obs, status)
+                    VALUES (:id, :nome, :tipo_pessoa, :cpf, :cnpj, :email, :data_nasc, :tel1, :tel2, :endereco, :bairro, :cidade, :estado, :cep, :obs, :status)
+                """, cli)
 
-        self.add_widget(layout)
+            for cfg in payload.get("configuracoes", []):
+                c.execute("INSERT OR REPLACE INTO configuracoes (chave, valor) VALUES (?, ?)", (cfg["chave"], cfg["valor"]))
 
-    def adicionar_usuario(self, *args):
-        n = self.txt_nome.text.strip()
-        u = self.txt_u.text.strip()
-        p = self.txt_p.text.strip()
-        if not n or not u or not p:
-            popup_aviso("Aviso", "Preencha todos os campos do utilizador.")
-            return
-
-        app = App.get_running_app()
-        h, s = SecurityHelper.gerar_hash(p)
-        try:
-            with app.db.get_connection() as conn:
-                conn.execute("""
-                    INSERT INTO usuarios (usuario, senha_hash, salt, nome_completo, perfil)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (u, h, s, n, "OPERADOR"))
-                conn.commit()
-            self.txt_nome.text = ""
-            self.txt_u.text = ""
-            self.txt_p.text = ""
-            popup_aviso("Sucesso", f"Utilizador '{u}' criado com sucesso.")
-            self.manager.current = "menu"
-        except sqlite3.IntegrityError:
-            popup_aviso("Erro", "Nome de utilizador já existente.")
+            conn.commit()
 
 # ==============================================================================
-# INICIALIZAÇÃO DA APLICAÇÃO MÓVEL
+# VALOR POR EXTENSO
 # ==============================================================================
-class ReciboSoftwareMobileApp(App):
-    def build(self):
+def valor_por_extenso(valor: float) -> str:
+    inteiro = int(valor)
+    centavos = int(round((valor - inteiro) * 100))
+
+    unidades = ["", "Um", "Dois", "Três", "Quatro", "Cinco", "Seis", "Sete", "Oito", "Nove"]
+    dezenas = ["", "Dez", "Vinte", "Trinta", "Quarenta", "Cinquenta", "Sessenta", "Setenta", "Oitenta", "Noventa"]
+    teens = ["Dez", "Onze", "Doze", "Treze", "Quatorze", "Quinze", "Dezesseis", "Dezessete", "Dezoito", "Dezenove"]
+    centenas = ["", "Cento", "Duzentos", "Trezentos", "Quatrocentos", "Quinhentos", "Seiscentos", "Setecentos", "Oitocentos", "Novecentos"]
+
+    def conv_3(n):
+        if n == 100: return "Cem"
+        c, r = divmod(n, 100)
+        d, u = divmod(r, 10)
+        partes = []
+        if c: partes.append(centenas[c])
+        if d == 1:
+            partes.append(teens[u])
+        else:
+            if d: partes.append(dezenas[d])
+            if u: partes.append(unidades[u])
+        return " e ".join(partes)
+
+    extenso = conv_3(inteiro) + (" Real" if inteiro == 1 else " Reais") if inteiro > 0 else ""
+    if centavos > 0:
+        c_ext = conv_3(centavos) + (" Centavo" if centavos == 1 else " Centavos")
+        extenso = f"{extenso} e {c_ext}" if extenso else c_ext
+    return (extenso.strip() + ".") if extenso else "Zero Reais."
+
+# ==============================================================================
+# JANELA DE LOGIN
+# ==============================================================================
+class LoginWindow(ctk.CTkToplevel):
+    def __init__(self, parent, db: DatabaseManager, on_success):
+        super().__init__(parent)
+        self.db = db
+        self.on_success = on_success
+
+        self.title("Acesso Restrito - Recibo Software")
+        self.geometry("420x460")
+        self.resizable(False, False)
+        self.configure(fg_color=THEME["bg_app"])
+
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() - 420) // 2
+        y = (self.winfo_screenheight() - 460) // 2
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+
+        card = ctk.CTkFrame(self, fg_color=THEME["card_main"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
+        card.pack(fill="both", expand=True, padx=24, pady=24)
+
+        traffic = ctk.CTkFrame(card, fg_color="transparent")
+        traffic.pack(anchor="w", padx=16, pady=(16, 6))
+        for cor in [THEME["traffic_red"], THEME["traffic_yellow"], THEME["traffic_green"]]:
+            ctk.CTkLabel(traffic, text="●", font=ctk.CTkFont(size=12), text_color=cor).pack(side="left", padx=2)
+
+        ctk.CTkLabel(card, text="RECIBO", font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"), text_color=THEME["text_primary"]).pack(pady=(4, 0))
+        ctk.CTkLabel(card, text="Acesso ao Sistema", font=ctk.CTkFont(size=12), text_color=THEME["accent_blue"]).pack(pady=(0, 20))
+
+        ctk.CTkLabel(card, text="UTILIZADOR", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_muted"]).pack(anchor="w", padx=24, pady=(0, 2))
+        self.txt_user = ctk.CTkEntry(card, height=40, placeholder_text="Ex: admin", fg_color=THEME["input_bg"], border_color=THEME["input_border"])
+        self.txt_user.insert(0, "admin")
+        self.txt_user.pack(fill="x", padx=24, pady=(0, 12))
+
+        ctk.CTkLabel(card, text="PALAVRA-PASSE", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_muted"]).pack(anchor="w", padx=24, pady=(0, 2))
+        self.txt_pass = ctk.CTkEntry(card, height=40, show="•", placeholder_text="Introduza a palavra-passe...", fg_color=THEME["input_bg"], border_color=THEME["input_border"])
+        self.txt_pass.insert(0, "admin123")
+        self.txt_pass.pack(fill="x", padx=24, pady=(0, 20))
+        self.txt_pass.bind("", lambda e: self._fazer_login())
+
+        btn_entrar = ctk.CTkButton(
+            card, text="Entrar no Sistema", height=42, corner_radius=10,
+            fg_color=THEME["accent_blue"], hover_color="#2563eb",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            command=self._fazer_login
+        )
+        btn_entrar.pack(fill="x", padx=24, pady=(0, 12))
+
+        ctk.CTkLabel(card, text="Credencial inicial: admin | admin123", font=ctk.CTkFont(size=10), text_color=THEME["text_muted"]).pack()
+
+    def _fazer_login(self):
+        u = self.txt_user.get().strip()
+        p = self.txt_pass.get().strip()
+
+        usuario_autenticado = self.db.autenticar(u, p)
+        if usuario_autenticado:
+            self.destroy()
+            self.on_success(usuario_autenticado)
+        else:
+            messagebox.showerror("Acesso Recusado", "Utilizador ou palavra-passe inválidos.")
+
+# ==============================================================================
+# APLICAÇÃO PRINCIPAL
+# ==============================================================================
+class ReciboSoftwareApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
         self.db = DatabaseManager()
         self.usuario_logado = None
 
-        sm = ScreenManager()
-        sm.add_widget(LoginScreen(name="login"))
-        sm.add_widget(MenuScreen(name="menu"))
-        sm.add_widget(ReciboScreen(name="recibo"))
-        sm.add_widget(ListaRecibosScreen(name="lista"))
-        sm.add_widget(UsuariosAdminScreen(name="usuarios"))
-        return sm
+        self.title("RECIBO - SOFTWARE v2.8")
+        self.geometry("1340x820")
+        self.minsize(1180, 720)
+        self.configure(fg_color=THEME["bg_app"])
 
-if __name__ == "__main__":
-    ReciboSoftwareMobileApp().run()
+        self.cliente_id_atual = None
+        self.recibo_id_atual = None
+        self.logo_preview_img = None
+        self.nav_btns = {}
+
+        self.withdraw()
+        LoginWindow(self, self.db, on_success=self._iniciar_sessao)
+
+    def _iniciar_sessao(self, usuario):
+        self.usuario_logado = usuario
+        self.deiconify()
+        self._construir_base()
+        self._construir_views()
+        self.navegar("cadastros")
+
+    def _construir_base(self):
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+
+        # 1. SIDEBAR LATERAL
+        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color=THEME["sidebar"], border_width=0)
+        self.sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        self.sidebar.grid_propagate(False)
+
+        traffic_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        traffic_box.pack(anchor="w", padx=20, pady=(18, 14))
+
+        for cor in [THEME["traffic_red"], THEME["traffic_yellow"], THEME["traffic_green"]]:
+            ctk.CTkLabel(traffic_box, text="●", font=ctk.CTkFont(size=14), text_color=cor).pack(side="left", padx=3)
+
+        brand_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        brand_box.pack(anchor="w", padx=20, pady=(0, 24))
+
+        ctk.CTkLabel(brand_box, text="RECIBO", font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"), text_color=THEME["text_primary"]).pack(anchor="w")
+        
+        sub_box = ctk.CTkFrame(brand_box, fg_color="transparent")
+        sub_box.pack(anchor="w", pady=(2, 0))
+        ctk.CTkLabel(sub_box, text="— SOFTWARE", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"), text_color=THEME["text_muted"]).pack(side="left")
+        
+        badge_ver = ctk.CTkLabel(sub_box, text=" v2.8 ", font=ctk.CTkFont(size=9, weight="bold"), fg_color="#20304c", text_color="#60a5fa", corner_radius=4)
+        badge_ver.pack(side="left", padx=(6, 0))
+
+        self.nav_container = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.nav_container.pack(fill="x", padx=12, pady=0)
+
+        self._criar_item_nav("📄  RECIBOS", "recibos")
+        self.btn_nav_cadastros = self._criar_item_nav("👥  CADASTROS", "cadastros")
+        self._criar_item_nav("⚙️  RECURSOS", "recursos")
+        self._criar_item_nav("📊  RELATÓRIOS", "relatorios")
+
+        hist_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        hist_box.pack(fill="x", padx=18, pady=(30, 10))
+
+        ctk.CTkLabel(hist_box, text="HISTÓRICO RECENTE  ⌵", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_muted"]).pack(anchor="w", pady=(0, 8))
+        
+        self.box_itens_historico = ctk.CTkFrame(hist_box, fg_color="transparent")
+        self.box_itens_historico.pack(fill="x")
+        self._atualizar_historico_sidebar()
+
+        footer_side = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        footer_side.pack(side="bottom", fill="x", padx=14, pady=16)
+
+        self.btn_cloud_sync = ctk.CTkButton(
+            footer_side, text="☁  Sincronizar Nuvem", height=32, corner_radius=8,
+            fg_color="#18273d", hover_color="#203452", border_width=1, border_color="#23426e",
+            text_color=THEME["accent_emerald"], font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._sincronizar_nuvem_acao
+        )
+        self.btn_cloud_sync.pack(fill="x")
+
+        # 2. TOP BAR SUPERIOR
+        self.topbar = ctk.CTkFrame(self, height=60, corner_radius=0, fg_color=THEME["topbar"], border_width=0)
+        self.topbar.grid(row=0, column=1, sticky="ew", padx=0, pady=0)
+        self.topbar.grid_propagate(False)
+
+        top_title = ctk.CTkFrame(self.topbar, fg_color="transparent")
+        top_title.pack(side="left", padx=24)
+        ctk.CTkLabel(top_title, text="👥", font=ctk.CTkFont(size=16), text_color=THEME["accent_blue"]).pack(side="left", padx=(0, 8))
+        self.lbl_view_title = ctk.CTkLabel(top_title, text="Cadastro de Clientes e Fornecedores", font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"), text_color=THEME["text_primary"])
+        self.lbl_view_title.pack(side="left")
+
+        ws_btn = ctk.CTkButton(
+            self.topbar, text="Áreas de Trabalho\nTechNova S.A.  ⌵", height=38, corner_radius=8,
+            fg_color="transparent", hover_color=THEME["card_main"], text_color=THEME["text_muted"],
+            font=ctk.CTkFont(size=11), command=self._abrir_modal_emitente_logo
+        )
+        ws_btn.pack(side="left", padx=(20, 10))
+
+        self.search_pill = ctk.CTkEntry(
+            self.topbar, width=200, height=36, corner_radius=18,
+            placeholder_text="🔍  Buscar... (⌘K)", fg_color=THEME["input_bg"],
+            border_color=THEME["card_border"], text_color=THEME["text_primary"]
+        )
+        self.search_pill.pack(side="left", padx=10)
+        self.search_pill.bind("", lambda e: self._busca_global(self.search_pill.get()))
+
+        btn_top_logo = ctk.CTkButton(
+            self.topbar, text="🖼️ Logomarca", width=105, height=32, corner_radius=16,
+            fg_color=THEME["card_main"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["card_border"], font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._abrir_modal_emitente_logo
+        )
+        btn_top_logo.pack(side="left", padx=6)
+
+        btn_top_az = ctk.CTkButton(
+            self.topbar, text="A-Z Recibos", width=100, height=32, corner_radius=16,
+            fg_color=THEME["card_main"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["card_border"], font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._abrir_modal_pesquisa_alfabetica_recibos
+        )
+        btn_top_az.pack(side="left", padx=6)
+
+        if self.usuario_logado and self.usuario_logado["perfil"] == "ADMIN":
+            btn_top_users = ctk.CTkButton(
+                self.topbar, text="👤 Utilizadores", width=105, height=32, corner_radius=16,
+                fg_color=THEME["card_main"], hover_color=THEME["btn_circle_add_hover"],
+                border_width=1, border_color=THEME["accent_blue"], text_color=THEME["accent_blue"],
+                font=ctk.CTkFont(size=11, weight="bold"), command=self._abrir_modal_gestao_usuarios
+            )
+            btn_top_users.pack(side="left", padx=6)
+
+        user_pill = ctk.CTkFrame(self.topbar, fg_color="transparent")
+        user_pill.pack(side="right", padx=24)
+
+        nome_user = self.usuario_logado["nome_completo"] if self.usuario_logado else "Operador"
+        perfil_tag = self.usuario_logado["perfil"] if self.usuario_logado else "USER"
+        iniciais_user = "".join([p[0] for p in nome_user.split()[:2]]).upper()
+
+        avatar = ctk.CTkLabel(user_pill, text=iniciais_user, font=ctk.CTkFont(size=11, weight="bold"), width=34, height=34, corner_radius=17, fg_color="#2b3b5c", text_color="#93c5fd")
+        avatar.pack(side="left", padx=(0, 8))
+
+        u_info = ctk.CTkFrame(user_pill, fg_color="transparent")
+        u_info.pack(side="left")
+        ctk.CTkLabel(u_info, text=f"{nome_user} ({perfil_tag})", font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["text_primary"]).pack(anchor="w")
+        ctk.CTkLabel(u_info, text="● Online", font=ctk.CTkFont(size=10), text_color=THEME["accent_emerald"]).pack(anchor="w")
+
+        # 3. CONTENT CONTAINER
+        self.main_container = ctk.CTkFrame(self, corner_radius=0, fg_color=THEME["bg_app"])
+        self.main_container.grid(row=1, column=1, sticky="nsew", padx=16, pady=16)
+        self.main_container.grid_rowconfigure(0, weight=1)
+        self.main_container.grid_columnconfigure(0, weight=1)
+
+    def _criar_item_nav(self, rotulo, chave):
+        btn = ctk.CTkButton(
+            self.nav_container, text=rotulo, height=44, corner_radius=10, anchor="w",
+            fg_color=THEME["nav_idle"], text_color=THEME["nav_idle_text"],
+            hover_color="#1c2538", font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            command=lambda k=chave: self.navegar(k)
+        )
+        btn.pack(fill="x", pady=3)
+        self.nav_btns[chave] = btn
+        return btn
+
+    def _atualizar_historico_sidebar(self):
+        for w in self.box_itens_historico.winfo_children():
+            w.destroy()
+        recibos = self.db.ultimos_recibos(3)
+        if not recibos:
+            for it in ["🕒  Histórico recente", "✎  Histórico recente (...)", "☵  Histórico recente"]:
+                ctk.CTkLabel(self.box_itens_historico, text=it, font=ctk.CTkFont(size=11), text_color="#5b6b85").pack(anchor="w", pady=2)
+        else:
+            for r in recibos:
+                lbl = f"📄 Nº {r['numero']} - {r['cliente_nome'][:14]}"
+                btn = ctk.CTkButton(
+                    self.box_itens_historico, text=lbl, anchor="w", height=24, fg_color="transparent",
+                    hover_color="#1c2538", text_color="#7b8ba5", font=ctk.CTkFont(size=10),
+                    command=lambda rec=r: self._carregar_recibo_historico(rec)
+                )
+                btn.pack(fill="x", pady=1)
+
+    def navegar(self, destino):
+        titulos = {
+            "cadastros": "Cadastro de Clientes e Fornecedores",
+            "recibos": "Emissão de Recibos de Pagamento",
+            "recursos": "Recursos, Backups e Suporte",
+            "relatorios": "Relatórios e Consultas Consolidadas"
+        }
+        self.lbl_view_title.configure(text=titulos.get(destino, "Recibo Software"))
+
+        tot = self.db.total_clientes()
+        self.btn_nav_cadastros.configure(text=f"👥  CADASTROS  [{tot}]")
+
+        for chave, frame in self.frames.items():
+            frame.grid_forget()
+            self.nav_btns[chave].configure(fg_color=THEME["nav_idle"], text_color=THEME["nav_idle_text"])
+
+        self.frames[destino].grid(row=0, column=0, sticky="nsew")
+        self.nav_btns[destino].configure(fg_color=THEME["nav_active"], text_color=THEME["nav_active_text"])
+
+        if destino == "cadastros":
+            self._recarregar_ultimos_cadastros()
+        elif destino == "recibos":
+            self.txt_rec_num.delete(0, "end")
+            self.txt_rec_num.insert(0, self.db.get_proximo_numero_recibo())
+            self._atualizar_preview_logo_recibos()
+
+    def _construir_views(self):
+        self.frames = {
+            "cadastros": self._view_cadastros(),
+            "recibos": self._view_recibos(),
+            "recursos": self._view_recursos(),
+            "relatorios": self._view_relatorios()
+        }
+
+    def _criar_botoes_circulares_acao(self, parent_frame, cmd_novo, cmd_editar, cmd_excluir, cmd_buscar):
+        actions_bar = ctk.CTkFrame(parent_frame, fg_color="transparent")
+        
+        btn_add = ctk.CTkButton(
+            actions_bar, text="+", width=42, height=42, corner_radius=21,
+            fg_color=THEME["btn_circle_add"], hover_color=THEME["btn_circle_add_hover"],
+            text_color=THEME["btn_circle_add_icon"], font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
+            command=cmd_novo
+        )
+        btn_add.pack(side="left", padx=5)
+
+        btn_edit = ctk.CTkButton(
+            actions_bar, text="✎", width=42, height=42, corner_radius=21,
+            fg_color=THEME["btn_circle_edit"], hover_color=THEME["btn_circle_edit_hover"],
+            text_color=THEME["btn_circle_edit_icon"], font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            command=cmd_editar
+        )
+        btn_edit.pack(side="left", padx=5)
+
+        btn_del = ctk.CTkButton(
+            actions_bar, text="🗑", width=42, height=42, corner_radius=21,
+            fg_color=THEME["btn_circle_del"], hover_color=THEME["btn_circle_del_hover"],
+            text_color=THEME["btn_circle_del_icon"], font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            command=cmd_excluir
+        )
+        btn_del.pack(side="left", padx=5)
+
+        btn_search = ctk.CTkButton(
+            actions_bar, text="🔍", width=42, height=42, corner_radius=21,
+            fg_color=THEME["btn_circle_search"], hover_color=THEME["btn_circle_search_hover"],
+            text_color=THEME["btn_circle_search_icon"], font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            command=cmd_buscar
+        )
+        btn_search.pack(side="left", padx=5)
+
+        return actions_bar
+
+    # ==============================================================================
+    # MODAL DE GESTÃO DE UTILIZADORES (ADMIN EXCLUSIVO)
+    # ==============================================================================
+    def _abrir_modal_gestao_usuarios(self):
+        if not self.usuario_logado or self.usuario_logado["perfil"] != "ADMIN":
+            messagebox.showerror("Acesso Recusado", "Apenas o Administrador pode gerir utilizadores.")
+            return
+
+        modal = ctk.CTkToplevel(self)
+        modal.title("Gestão de Utilizadores e Permissões")
+        modal.geometry("640x560")
+        modal.configure(fg_color=THEME["card_main"])
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="CONTROLO DE UTILIZADORES E ACESSOS", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["accent_blue"]).pack(pady=(18, 4))
+        ctk.CTkLabel(modal, text="Apenas o Administrador tem permissão para adicionar e remover contas.", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).pack(pady=(0, 14))
+
+        form_box = ctk.CTkFrame(modal, fg_color=THEME["input_bg"], corner_radius=12, border_width=1, border_color=THEME["card_border"])
+        form_box.pack(fill="x", padx=24, pady=8, ipady=8)
+
+        ctk.CTkLabel(form_box, text="CRIAR NOVO UTILIZADOR", font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["text_primary"]).pack(anchor="w", padx=16, pady=(6, 8))
+
+        r1 = ctk.CTkFrame(form_box, fg_color="transparent")
+        r1.pack(fill="x", padx=16, pady=2)
+        r1.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(r1, text="Nome Completo", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).grid(row=0, column=0, sticky="w")
+        txt_nome = ctk.CTkEntry(r1, height=36, corner_radius=8, fg_color=THEME["card_main"], border_color=THEME["card_border"])
+        txt_nome.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+
+        ctk.CTkLabel(r1, text="Nome de Utilizador (Login)", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).grid(row=0, column=1, sticky="w")
+        txt_user = ctk.CTkEntry(r1, height=36, corner_radius=8, fg_color=THEME["card_main"], border_color=THEME["card_border"])
+        txt_user.grid(row=1, column=1, sticky="ew")
+
+        r2 = ctk.CTkFrame(form_box, fg_color="transparent")
+        r2.pack(fill="x", padx=16, pady=(8, 12))
+        r2.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(r2, text="Palavra-passe", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).grid(row=0, column=0, sticky="w")
+        txt_pass = ctk.CTkEntry(r2, height=36, corner_radius=8, show="•", fg_color=THEME["card_main"], border_color=THEME["card_border"])
+        txt_pass.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+
+        ctk.CTkLabel(r2, text="Perfil / Nível", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).grid(row=0, column=1, sticky="w")
+        cb_perfil = ctk.CTkComboBox(r2, values=["OPERADOR", "ADMIN"], height=36, corner_radius=8, fg_color=THEME["card_main"], border_color=THEME["card_border"])
+        cb_perfil.set("OPERADOR")
+        cb_perfil.grid(row=1, column=1, sticky="ew")
+
+        def add_user():
+            u = txt_user.get().strip()
+            p = txt_pass.get().strip()
+            n = txt_nome.get().strip()
+            perf = cb_perfil.get()
+
+            if not u or not p or not n:
+                messagebox.showwarning("Atenção", "Preencha todos os campos do utilizador.")
+                return
+            try:
+                self.db.cadastrar_usuario(u, p, n, perf)
+                txt_nome.delete(0, "end"); txt_user.delete(0, "end"); txt_pass.delete(0, "end")
+                carregar_lista_usuarios()
+                messagebox.showinfo("Sucesso", f"Utilizador '{u}' cadastrado com sucesso.")
+            except sqlite3.IntegrityError:
+                messagebox.showerror("Erro", "Nome de utilizador já existente.")
+
+        ctk.CTkButton(form_box, text="+ Adicionar Utilizador", height=36, corner_radius=8, fg_color=THEME["accent_emerald"], hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=add_user).pack(padx=16, pady=(0, 4))
+
+        ctk.CTkLabel(modal, text="UTILIZADORES REGISTADOS", font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["text_muted"]).pack(anchor="w", padx=24, pady=(10, 4))
+        scroll_users = ctk.CTkScrollableFrame(modal, fg_color=THEME["input_bg"], corner_radius=12)
+        scroll_users.pack(fill="both", expand=True, padx=24, pady=16)
+
+        def carregar_lista_usuarios():
+            for w in scroll_users.winfo_children(): w.destroy()
+            users = self.db.listar_usuarios()
+            for u in users:
+                row = ctk.CTkFrame(scroll_users, fg_color=THEME["card_main"], corner_radius=8)
+                row.pack(fill="x", pady=3, padx=4)
+
+                txt_lbl = f"{u['nome_completo']} ({u['usuario']}) - [{u['perfil']}]"
+                ctk.CTkLabel(row, text=txt_lbl, font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["text_primary"]).pack(side="left", padx=12, pady=8)
+
+                if u["usuario"] != "admin" and u["id"] != self.usuario_logado["id"]:
+                    btn_del = ctk.CTkButton(
+                        row, text="Remover", width=80, height=28, corner_radius=6,
+                        fg_color=THEME["btn_circle_del"], hover_color=THEME["btn_circle_del_hover"],
+                        text_color=THEME["btn_circle_del_icon"], font=ctk.CTkFont(size=10, weight="bold"),
+                        command=lambda uid=u["id"]: [self.db.excluir_usuario(uid), carregar_lista_usuarios()]
+                    )
+                    btn_del.pack(side="right", padx=10)
+
+        carregar_lista_usuarios()
+
+    # ==============================================================================
+    # 1. VIEW CADASTROS
+    # ==============================================================================
+    def _view_cadastros(self):
+        root = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        root.grid_rowconfigure(0, weight=1)
+        root.grid_columnconfigure(0, weight=4)
+        root.grid_columnconfigure(1, weight=1)
+
+        center_col = ctk.CTkFrame(root, fg_color="transparent")
+        center_col.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        center_col.grid_rowconfigure(1, weight=1)
+        center_col.grid_columnconfigure(0, weight=1)
+
+        top_switch = ctk.CTkFrame(center_col, fg_color="transparent")
+        top_switch.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        ctk.CTkLabel(
+            top_switch, text="<  1. Identificação (ativo)  ➔  2. Contatos & Docs  ➔  3. Endereço",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["text_muted"]
+        ).pack(side="left")
+
+        btn_logo_tab = ctk.CTkButton(
+            top_switch, text="🖼️  Logomarca da Empresa", height=32, corner_radius=16,
+            fg_color=THEME["card_main"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["accent_blue"], text_color=THEME["text_primary"],
+            font=ctk.CTkFont(size=11, weight="bold"), command=self._abrir_modal_emitente_logo
+        )
+        btn_logo_tab.pack(side="right")
+
+        card_form = ctk.CTkFrame(center_col, fg_color=THEME["card_main"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
+        card_form.grid(row=1, column=0, sticky="nsew")
+
+        scroll = ctk.CTkScrollableFrame(card_form, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=22, pady=16)
+
+        ctk.CTkLabel(
+            scroll, text="01 | IDENTIFICAÇÃO E DADOS",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"), text_color=THEME["text_muted"]
+        ).pack(anchor="w", pady=(4, 10))
+
+        r0 = ctk.CTkFrame(scroll, fg_color="transparent")
+        r0.pack(fill="x", pady=3)
+        r0.grid_columnconfigure(0, weight=1)
+        r0.grid_columnconfigure(1, weight=3)
+
+        self.txt_cad_id = ctk.CTkEntry(
+            r0, width=130, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_id.insert(0, f"{self.db.total_clientes()+1:03d}")
+        self.txt_cad_id.grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+        self.cb_cad_tipo = ctk.CTkComboBox(
+            r0, values=["Jurídica", "Física"], height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"],
+            text_color=THEME["text_primary"], button_color=THEME["input_border"]
+        )
+        self.cb_cad_tipo.grid(row=0, column=1, sticky="w")
+
+        ctk.CTkLabel(scroll, text="Nome/Razão Social", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack(anchor="w", pady=(8, 2))
+        self.txt_cad_nome = ctk.CTkEntry(
+            scroll, height=40, corner_radius=8, placeholder_text="Razão Social ou Nome Completo...",
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_nome.insert(0, "Carlos Eduardo de Souza S.A.")
+        self.txt_cad_nome.pack(fill="x", pady=(0, 8))
+
+        r1 = ctk.CTkFrame(scroll, fg_color="transparent")
+        r1.pack(fill="x", pady=2)
+        r1.grid_columnconfigure(0, weight=3)
+        r1.grid_columnconfigure(1, weight=2)
+        r1.grid_columnconfigure(2, weight=3)
+
+        ctk.CTkLabel(r1, text="CPF/CNPJ", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=0, sticky="w")
+        f_cnpj = ctk.CTkFrame(r1, fg_color="transparent")
+        f_cnpj.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(2, 0))
+        
+        self.txt_cad_cnpj = ctk.CTkEntry(
+            f_cnpj, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_cnpj.insert(0, "12.345.678/0001-90")
+        self.txt_cad_cnpj.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(f_cnpj, text=" ✓ ", font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["accent_emerald"]).pack(side="left", padx=4)
+
+        ctk.CTkLabel(r1, text="CPF", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=1, sticky="w")
+        self.txt_cad_cpf = ctk.CTkEntry(
+            r1, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_cpf.insert(0, "-")
+        self.txt_cad_cpf.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(2, 0))
+
+        btn_inc = ctk.CTkButton(
+            r1, text="Incluir no Cadastro  +", height=38, corner_radius=8,
+            fg_color=THEME["accent_indigo"], hover_color="#4338ca",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            command=self._salvar_cliente_form
+        )
+        btn_inc.grid(row=1, column=2, sticky="ew", pady=(2, 0))
+
+        r2 = ctk.CTkFrame(scroll, fg_color="transparent")
+        r2.pack(fill="x", pady=(10, 4))
+        r2.grid_columnconfigure((0, 1, 2, 3), weight=1)
+
+        ctk.CTkLabel(r2, text="Documento & Contatos", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=0, sticky="w")
+        self.txt_cad_email = ctk.CTkEntry(
+            r2, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_email.insert(0, "contato@carlos-desouza.co")
+        self.txt_cad_email.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(2, 0))
+
+        ctk.CTkLabel(r2, text="Data Nasc./Abertura", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=1, sticky="w")
+        f_dt = ctk.CTkFrame(r2, fg_color="transparent")
+        f_dt.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(2, 0))
+        self.txt_cad_data = ctk.CTkEntry(
+            f_dt, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_data.insert(0, "10/05/2015")
+        self.txt_cad_data.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(f_dt, text=" 🗓 ", font=ctk.CTkFont(size=12), text_color=THEME["text_muted"]).pack(side="left")
+
+        ctk.CTkLabel(r2, text="Telefone 1", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=2, sticky="w")
+        self.txt_cad_tel1 = ctk.CTkEntry(
+            r2, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_tel1.insert(0, "(11) 98765-4321")
+        self.txt_cad_tel1.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(2, 0))
+
+        ctk.CTkLabel(r2, text="Telefone 2", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=3, sticky="w")
+        self.txt_cad_tel2 = ctk.CTkEntry(
+            r2, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_tel2.grid(row=1, column=3, sticky="ew", pady=(2, 0))
+
+        ctk.CTkLabel(scroll, text="E-mail", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).pack(anchor="w", pady=(1, 10))
+
+        ctk.CTkLabel(
+            scroll, text="02 | ENDEREÇO & OBSERVAÇÕES",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"), text_color=THEME["text_muted"]
+        ).pack(anchor="w", pady=(10, 8))
+
+        r3 = ctk.CTkFrame(scroll, fg_color="transparent")
+        r3.pack(fill="x", pady=2)
+        r3.grid_columnconfigure(0, weight=4)
+        r3.grid_columnconfigure(1, weight=2)
+        r3.grid_columnconfigure(2, weight=3)
+        r3.grid_columnconfigure(3, weight=1)
+        r3.grid_columnconfigure(4, weight=2)
+
+        ctk.CTkLabel(r3, text="Morada", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=0, sticky="w")
+        self.txt_cad_end = ctk.CTkEntry(
+            r3, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_end.insert(0, "Av. Paulista, 1000 - Cj 42")
+        self.txt_cad_end.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(2, 0))
+
+        ctk.CTkLabel(r3, text="Bairro", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=1, sticky="w")
+        self.txt_cad_bairro = ctk.CTkEntry(
+            r3, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_bairro.insert(0, "Bela Vista")
+        self.txt_cad_bairro.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(2, 0))
+
+        ctk.CTkLabel(r3, text="Cidade", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=2, sticky="w")
+        self.txt_cad_cid = ctk.CTkEntry(
+            r3, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_cid.insert(0, "São Paulo")
+        self.txt_cad_cid.grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(2, 0))
+
+        ctk.CTkLabel(r3, text="Estado", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=3, sticky="w")
+        self.cb_cad_uf = ctk.CTkComboBox(
+            r3, values=["SP", "RJ", "MG", "ES", "PR", "SC", "RS", "BA", "DF"], width=75, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"], button_color=THEME["input_border"]
+        )
+        self.cb_cad_uf.set("SP")
+        self.cb_cad_uf.grid(row=1, column=3, sticky="ew", padx=(0, 8), pady=(2, 0))
+
+        ctk.CTkLabel(r3, text="Código Postal / CEP", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=4, sticky="w")
+        f_cep = ctk.CTkFrame(r3, fg_color="transparent")
+        f_cep.grid(row=1, column=4, sticky="ew", pady=(2, 0))
+        self.txt_cad_cep = ctk.CTkEntry(
+            f_cep, height=38, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_cep.insert(0, "01310-100")
+        self.txt_cad_cep.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(f_cep, text=" ✓ ", font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["accent_emerald"]).pack(side="left", padx=3)
+
+        ctk.CTkLabel(scroll, text="Observações", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack(anchor="w", pady=(10, 2))
+        self.txt_cad_obs = ctk.CTkEntry(
+            scroll, height=44, corner_radius=8,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        self.txt_cad_obs.insert(0, "Cliente preferencial, faturação mensal via PIX.")
+        self.txt_cad_obs.pack(fill="x", pady=(0, 10))
+
+        bot_bar = ctk.CTkFrame(center_col, height=54, fg_color="transparent")
+        bot_bar.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+
+        ctk.CTkButton(
+            bot_bar, text="Salvar Registo", width=140, height=38, corner_radius=19,
+            fg_color=THEME["accent_blue"], hover_color="#2563eb",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            command=self._salvar_cliente_form
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            bot_bar, text="Cancelar", width=110, height=38, corner_radius=19,
+            fg_color=THEME["card_main"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["card_border"],
+            text_color=THEME["text_muted"], font=ctk.CTkFont(family="Segoe UI", size=13),
+            command=self._limpar_cliente_form
+        ).pack(side="left")
+
+        botoes_circulares = self._criar_botoes_circulares_acao(
+            bot_bar,
+            cmd_novo=self._limpar_cliente_form,
+            cmd_editar=self._salvar_cliente_form,
+            cmd_excluir=self._excluir_cliente_db,
+            cmd_buscar=self._modal_buscar_cliente
+        )
+        botoes_circulares.pack(side="right")
+
+        right_panel = ctk.CTkFrame(root, fg_color=THEME["card_right"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
+        right_panel.grid(row=0, column=1, sticky="nsew")
+
+        h_right = ctk.CTkFrame(right_panel, fg_color="transparent")
+        h_right.pack(fill="x", padx=16, pady=(16, 12))
+        ctk.CTkLabel(h_right, text="👤  ÚLTIMOS CADASTROS", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"), text_color=THEME["text_muted"]).pack(anchor="w")
+
+        self.scroll_ultimos = ctk.CTkScrollableFrame(right_panel, fg_color="transparent")
+        self.scroll_ultimos.pack(fill="both", expand=True, padx=12, pady=6)
+
+        return root
+
+    # ==============================================================================
+    # MODAL DE PESQUISA POR NOME & ORDENAÇÃO ALFABÉTICA
+    # ==============================================================================
+    def _abrir_modal_pesquisa_alfabetica_recibos(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("Pesquisa de Recibos - Ordem Alfabética")
+        modal.geometry("640x520")
+        modal.configure(fg_color=THEME["card_main"])
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="CONSULTA E ORDENAÇÃO DE RECIBOS", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["accent_blue"]).pack(pady=(16, 4))
+        
+        filter_bar = ctk.CTkFrame(modal, fg_color="transparent")
+        filter_bar.pack(fill="x", padx=18, pady=8)
+
+        txt_busca_nome = ctk.CTkEntry(
+            filter_bar, height=38, corner_radius=8,
+            placeholder_text="Filtrar por nome do cliente ou número...",
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"]
+        )
+        txt_busca_nome.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        cb_ordem = ctk.CTkComboBox(
+            filter_bar, values=["Ordem A-Z", "Ordem Z-A", "Mais Recentes", "Mais Antigos"],
+            height=38, corner_radius=8, width=140,
+            fg_color=THEME["input_bg"], border_color=THEME["input_border"],
+            text_color=THEME["text_primary"], button_color=THEME["input_border"]
+        )
+        cb_ordem.set("Ordem A-Z")
+        cb_ordem.pack(side="left")
+
+        scroll_resultados = ctk.CTkScrollableFrame(modal, fg_color="transparent")
+        scroll_resultados.pack(fill="both", expand=True, padx=18, pady=10)
+
+        def atualizar_lista():
+            for w in scroll_resultados.winfo_children(): w.destroy()
+
+            mapa_ordens = {
+                "Ordem A-Z": "alfabetica_az",
+                "Ordem Z-A": "alfabetica_za",
+                "Mais Recentes": "data_recente",
+                "Mais Antigos": "data_antiga"
+            }
+            chave_ordem = mapa_ordens.get(cb_ordem.get(), "alfabetica_az")
+            termo = txt_busca_nome.get().strip()
+
+            recibos = self.db.buscar_recibos(nome_termo=termo, ordem=chave_ordem)
+            if not recibos:
+                ctk.CTkLabel(scroll_resultados, text="Nenhum recibo localizado.", font=ctk.CTkFont(size=12), text_color=THEME["text_muted"]).pack(pady=20)
+                return
+
+            for r in recibos:
+                item_card = ctk.CTkFrame(scroll_resultados, fg_color=THEME["input_bg"], corner_radius=10, border_width=1, border_color=THEME["card_border"])
+                item_card.pack(fill="x", pady=4, padx=2)
+
+                c_info = ctk.CTkFrame(item_card, fg_color="transparent")
+                c_info.pack(side="left", fill="both", expand=True, padx=12, pady=8)
+
+                ctk.CTkLabel(c_info, text=f"Nº {r['numero']}  •  {r['cliente_nome']}", font=ctk.CTkFont(size=13, weight="bold"), text_color=THEME["text_primary"], anchor="w").pack(fill="x")
+                ctk.CTkLabel(c_info, text=f"Data: {r['data_recibo']}  |  Valor: R$ {r['valor']:,.2f}  |  Ref: {r['referente'][:30]}", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"], anchor="w").pack(fill="x", pady=(2, 0))
+
+                btn_carregar = ctk.CTkButton(
+                    item_card, text="Abrir no Recibo", width=120, height=32, corner_radius=6,
+                    fg_color=THEME["accent_blue"], hover_color="#2563eb", font=ctk.CTkFont(size=11, weight="bold"),
+                    command=lambda rec=r: [self._carregar_recibo_historico(rec), modal.destroy()]
+                )
+                btn_carregar.pack(side="right", padx=10)
+
+        txt_busca_nome.bind("", lambda e: atualizar_lista())
+        cb_ordem.configure(command=lambda e: atualizar_lista())
+        atualizar_lista()
+
+    # ==============================================================================
+    # SINCRONIZAÇÃO NUVEM
+    # ==============================================================================
+    def _sincronizar_nuvem_acao(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("Sincronização em Nuvem")
+        modal.geometry("460x320")
+        modal.configure(fg_color=THEME["card_main"])
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="☁  SALVAMENTO EM NUVEM", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["accent_emerald"]).pack(pady=(20, 6))
+        ctk.CTkLabel(modal, text="Exporte ou importe a base sincronizada com a sua pasta de nuvem\n(Google Drive, OneDrive, Dropbox ou Servidor Local).", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"], justify="center").pack(pady=(0, 16))
+
+        box = ctk.CTkFrame(modal, fg_color=THEME["input_bg"], corner_radius=12, border_width=1, border_color=THEME["card_border"])
+        box.pack(fill="x", padx=24, pady=8, ipady=8)
+
+        def exportar_nuvem():
+            caminho = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("Backup Nuvem JSON", "*.json")],
+                initialfile=f"recibo_cloud_sync_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            )
+            if caminho:
+                try:
+                    payload = self.db.exportar_backup_nuvem_json()
+                    with open(caminho, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, ensure_ascii=False, indent=2)
+                    self.btn_cloud_sync.configure(text="☁  Sincronizado Agora")
+                    messagebox.showinfo("Sucesso", "Base completa exportada e sincronizada com sucesso.")
+                    modal.destroy()
+                except Exception as err:
+                    messagebox.showerror("Erro", f"Falha na exportação: {err}")
+
+        def importar_nuvem():
+            caminho = filedialog.askopenfilename(filetypes=[("Backup Nuvem JSON", "*.json")])
+            if caminho:
+                try:
+                    with open(caminho, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    self.db.importar_backup_nuvem_json(payload)
+                    self.navegar("cadastros")
+                    self._atualizar_historico_sidebar()
+                    self.btn_cloud_sync.configure(text="☁  Sincronizado Agora")
+                    messagebox.showinfo("Sucesso", "Dados importados e consolidados com sucesso.")
+                    modal.destroy()
+                except Exception as err:
+                    messagebox.showerror("Erro", f"Falha ao carregar o ficheiro de nuvem: {err}")
+
+        ctk.CTkButton(box, text="⬆  Salvar / Exportar para Nuvem", height=40, corner_radius=8, fg_color=THEME["accent_emerald"], hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=exportar_nuvem).pack(fill="x", padx=16, pady=6)
+        ctk.CTkButton(box, text="⬇  Carregar / Importar da Nuvem", height=40, corner_radius=8, fg_color=THEME["accent_blue"], hover_color="#2563eb", font=ctk.CTkFont(weight="bold"), command=importar_nuvem).pack(fill="x", padx=16, pady=6)
+        ctk.CTkButton(modal, text="Fechar", width=100, height=32, corner_radius=6, fg_color=THEME["btn_circle_add"], hover_color=THEME["btn_circle_add_hover"], command=modal.destroy).pack(pady=10)
+
+    # ==============================================================================
+    # MODAL DE LOGOMARCA E EMITENTE
+    # ==============================================================================
+    def _abrir_modal_emitente_logo(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("Configurações da Empresa & Logomarca")
+        modal.geometry("560x580")
+        modal.configure(fg_color=THEME["card_main"])
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="EMITENTE & LOGOMARCA", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["accent_blue"]).pack(pady=(18, 4))
+        ctk.CTkLabel(modal, text="Defina os dados da empresa e a imagem que figurará nos recibos emitidos.", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).pack(pady=(0, 14))
+
+        box_logo = ctk.CTkFrame(modal, fg_color=THEME["input_bg"], corner_radius=12, border_width=1, border_color=THEME["card_border"])
+        box_logo.pack(fill="x", padx=24, pady=8, ipady=10)
+
+        lbl_preview = ctk.CTkLabel(
+            box_logo, text="Sem Logomarca\nCarregada", width=220, height=100,
+            fg_color=THEME["card_main"], text_color=THEME["text_muted"], corner_radius=10,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        lbl_preview.pack(pady=(8, 10))
+
+        def refresh_preview():
+            p = self.db.get_config("logo_path", "")
+            if not p or not os.path.exists(p):
+                if os.path.exists("Logo.jpg"): p = os.path.abspath("Logo.jpg")
+            if p and os.path.exists(p):
+                try:
+                    pil = Image.open(p)
+                    w, h = pil.size
+                    prop = min(220 / w, 100 / h)
+                    nw, nh = max(1, int(w * prop)), max(1, int(h * prop))
+                    img_ctk = ctk.CTkImage(light_image=pil, dark_image=pil, size=(nw, nh))
+                    lbl_preview.configure(image=img_ctk, text="")
+                    return
+                except Exception: pass
+            lbl_preview.configure(image="", text="Sem Logomarca\nCarregada")
+
+        refresh_preview()
+
+        b_row = ctk.CTkFrame(box_logo, fg_color="transparent")
+        b_row.pack(pady=4)
+
+        def pick_logo():
+            caminho = filedialog.askopenfilename(filetypes=[("Imagens", "*.jpg *.jpeg *.png *.bmp")])
+            if caminho:
+                try:
+                    dest = os.path.abspath("Logo.jpg")
+                    Image.open(caminho).convert("RGB").save(dest, "JPEG")
+                    self.db.set_config("logo_path", dest)
+                    refresh_preview()
+                    self._atualizar_preview_logo_recibos()
+                    messagebox.showinfo("Sucesso", "Logomarca guardada com sucesso.")
+                except Exception as err:
+                    messagebox.showerror("Erro", f"Falha ao carregar ficheiro: {err}")
+
+        def delete_logo():
+            self.db.set_config("logo_path", "")
+            if os.path.exists("Logo.jpg"):
+                try: os.remove("Logo.jpg")
+                except Exception: pass
+            refresh_preview()
+            self._atualizar_preview_logo_recibos()
+            messagebox.showinfo("Sucesso", "Logomarca removida com sucesso.")
+
+        ctk.CTkButton(b_row, text="📁 Localizar Logomarca", width=170, height=36, corner_radius=8, fg_color=THEME["accent_blue"], font=ctk.CTkFont(weight="bold"), command=pick_logo).pack(side="left", padx=6)
+        ctk.CTkButton(b_row, text="🗑 Excluir Logo", width=130, height=36, corner_radius=8, fg_color=THEME["btn_circle_del"], hover_color=THEME["btn_circle_del_hover"], text_color=THEME["btn_circle_del_icon"], command=delete_logo).pack(side="left", padx=6)
+
+        f_empresa = ctk.CTkFrame(modal, fg_color="transparent")
+        f_empresa.pack(fill="x", padx=24, pady=12)
+
+        ctk.CTkLabel(f_empresa, text="Nome da Empresa / Profissional", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack(anchor="w")
+        txt_em_nome = ctk.CTkEntry(f_empresa, height=38, corner_radius=8, fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"])
+        txt_em_nome.insert(0, self.db.get_config("emitente_nome", "TechNova S.A."))
+        txt_em_nome.pack(fill="x", pady=(2, 8))
+
+        r_em = ctk.CTkFrame(f_empresa, fg_color="transparent")
+        r_em.pack(fill="x")
+        r_em.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(r_em, text="NIF / CNPJ / Documento", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=0, sticky="w")
+        txt_em_doc = ctk.CTkEntry(r_em, height=38, corner_radius=8, fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"])
+        txt_em_doc.insert(0, self.db.get_config("emitente_doc", "00.000.000/0001-00"))
+        txt_em_doc.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(2, 0))
+
+        ctk.CTkLabel(r_em, text="Cidade do Emitente", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).grid(row=0, column=1, sticky="w")
+        txt_em_cid = ctk.CTkEntry(r_em, height=38, corner_radius=8, fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"])
+        txt_em_cid.insert(0, self.db.get_config("emitente_cidade", "São Paulo"))
+        txt_em_cid.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(2, 0))
+
+        def salvar_empresa():
+            self.db.set_config("emitente_nome", txt_em_nome.get().strip())
+            self.db.set_config("emitente_doc", txt_em_doc.get().strip())
+            self.db.set_config("emitente_cidade", txt_em_cid.get().strip())
+            messagebox.showinfo("Sucesso", "Configurações guardadas com sucesso.")
+            modal.destroy()
+
+        ctk.CTkButton(modal, text="Salvar Todas as Configurações", height=42, corner_radius=10, fg_color=THEME["accent_emerald"], hover_color="#059669", font=ctk.CTkFont(size=13, weight="bold"), command=salvar_empresa).pack(pady=16)
+
+    # ==============================================================================
+    # 2. VIEW RECIBOS
+    # ==============================================================================
+    def _view_recibos(self):
+        root = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        root.grid_rowconfigure(0, weight=1)
+        root.grid_columnconfigure(0, weight=3)
+        root.grid_columnconfigure(1, weight=1)
+
+        card_form = ctk.CTkFrame(root, fg_color=THEME["card_main"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
+        card_form.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+
+        scroll = ctk.CTkScrollableFrame(card_form, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=24, pady=20)
+
+        ctk.CTkLabel(scroll, text="EMISSÃO DE RECIBOS DE PAGAMENTO", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["text_primary"]).pack(anchor="w", pady=(0, 12))
+
+        logo_quick = ctk.CTkFrame(scroll, fg_color=THEME["input_bg"], corner_radius=10, border_width=1, border_color=THEME["card_border"])
+        logo_quick.pack(fill="x", pady=(0, 14), ipady=4)
+
+        self.lbl_logo_recibo_thumb = ctk.CTkLabel(logo_quick, text="[Logomarca Ativa no Recibo]", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"])
+        self.lbl_logo_recibo_thumb.pack(side="left", padx=16)
+
+        ctk.CTkButton(logo_quick, text="Alterar Logo", width=110, height=28, corner_radius=6, fg_color=THEME["btn_circle_add"], hover_color=THEME["btn_circle_add_hover"], text_color=THEME["text_primary"], command=self._abrir_modal_emitente_logo).pack(side="right", padx=14)
+
+        r1 = ctk.CTkFrame(scroll, fg_color="transparent")
+        r1.pack(fill="x", pady=4)
+        r1.grid_columnconfigure(0, weight=3)
+        r1.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(r1, text="Tipo de Operação", font=ctk.CTkFont(size=12), text_color=THEME["text_muted"]).grid(row=0, column=0, sticky="w")
+        self.cb_rec_tipo = ctk.CTkComboBox(r1, values=["Pagamento", "Recebimento"], height=40, corner_radius=8, fg_color=THEME["input_bg"], border_color=THEME["input_border"], button_color=THEME["input_border"])
+        self.cb_rec_tipo.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(2, 0))
+
+        ctk.CTkLabel(r1, text="Nº Documento", font=ctk.CTkFont(size=12), text_color=THEME["text_muted"]).grid(row=0, column=1, sticky="w")
+        self.txt_rec_num = ctk.CTkEntry(r1, height=40, corner_radius=8, fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"], font=ctk.CTkFont(weight="bold"))
+        self.txt_rec_num.insert(0, self.db.get_proximo_numero_recibo())
+        self.txt_rec_num.grid(row=1, column=1, sticky="ew", pady=(2, 0))
+
+        ctk.CTkLabel(scroll, text="Recebi(emos) de / Beneficiário", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack(anchor="w", pady=(10, 2))
+        self.txt_rec_cli = ctk.CTkEntry(scroll, height=40, corner_radius=8, placeholder_text="Nome completo ou Razão Social...", fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"])
+        self.txt_rec_cli.pack(fill="x")
+
+        ctk.CTkLabel(scroll, text="Documento (NIF / CPF / CNPJ)", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack(anchor="w", pady=(8, 2))
+        self.txt_rec_doc = ctk.CTkEntry(scroll, height=40, corner_radius=8, placeholder_text="000.000.000-00", fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"])
+        self.txt_rec_doc.pack(fill="x")
+
+        ctk.CTkLabel(scroll, text="Referente a", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack(anchor="w", pady=(8, 2))
+        self.txt_rec_ref = ctk.CTkEntry(scroll, height=48, corner_radius=8, placeholder_text="Descrição dos serviços prestados ou fornecimentos...", fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"])
+        self.txt_rec_ref.pack(fill="x")
+
+        r2 = ctk.CTkFrame(scroll, fg_color="transparent")
+        r2.pack(fill="x", pady=10)
+        r2.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(r2, text="Data de Emissão", font=ctk.CTkFont(size=12), text_color=THEME["text_muted"]).grid(row=0, column=0, sticky="w")
+        self.txt_rec_data = ctk.CTkEntry(r2, height=40, corner_radius=8, fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["text_primary"])
+        self.txt_rec_data.insert(0, datetime.now().strftime("%d/%m/%Y"))
+        self.txt_rec_data.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(2, 0))
+
+        ctk.CTkLabel(r2, text="Valor Total", font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["accent_emerald"]).grid(row=0, column=1, sticky="w")
+        self.txt_rec_val = ctk.CTkEntry(r2, height=40, corner_radius=8, fg_color=THEME["input_bg"], border_color=THEME["input_border"], text_color=THEME["accent_emerald"], font=ctk.CTkFont(size=14, weight="bold"))
+        self.txt_rec_val.insert(0, "1,00")
+        self.txt_rec_val.grid(row=1, column=1, sticky="ew", pady=(2, 0))
+
+        side_print = ctk.CTkFrame(root, fg_color=THEME["card_right"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
+        side_print.grid(row=0, column=1, sticky="nsew")
+
+        ctk.CTkLabel(side_print, text="IMPRESSÃO", font=ctk.CTkFont(size=13, weight="bold"), text_color=THEME["text_primary"]).pack(pady=(24, 16))
+
+        ctk.CTkButton(
+            side_print, text="🖨️\n\nIMPRIMIR\n1 Recibo / Folha", height=140, corner_radius=12,
+            fg_color=THEME["input_bg"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["card_border"],
+            font=ctk.CTkFont(size=13, weight="bold"), command=lambda: self.imprimir_recibo(1)
+        ).pack(fill="x", padx=16, pady=10)
+
+        ctk.CTkButton(
+            side_print, text="🖨️ 🖨️\n\nIMPRIMIR\n2 Recibos / Folha", height=140, corner_radius=12,
+            fg_color=THEME["input_bg"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1.5, border_color=THEME["accent_blue"], text_color=THEME["accent_blue"],
+            font=ctk.CTkFont(size=13, weight="bold"), command=lambda: self.imprimir_recibo(2)
+        ).pack(fill="x", padx=16, pady=10)
+
+        return root
+
+    def _atualizar_preview_logo_recibos(self):
+        p = self.db.get_config("logo_path", "")
+        if not p or not os.path.exists(p):
+            if os.path.exists("Logo.jpg"): p = os.path.abspath("Logo.jpg")
+        if p and os.path.exists(p):
+            try:
+                pil = Image.open(p)
+                w, h = pil.size
+                prop = min(120 / w, 40 / h)
+                img_ctk = ctk.CTkImage(light_image=pil, dark_image=pil, size=(int(w*prop), int(h*prop)))
+                self.lbl_logo_recibo_thumb.configure(image=img_ctk, text="")
+                return
+            except Exception: pass
+        self.lbl_logo_recibo_thumb.configure(image="", text="[Logomarca Ativa no Recibo]")
+
+    # ==============================================================================
+    # 3. VIEW RECURSOS
+    # ==============================================================================
+    def _view_recursos(self):
+        root = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        card = ctk.CTkFrame(root, fg_color=THEME["card_main"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
+        card.pack(fill="both", expand=True)
+
+        center = ctk.CTkFrame(card, fg_color="transparent")
+        center.pack(expand=True)
+
+        ctk.CTkButton(
+            center, text="💾\n\nBACKUP LOCAL SQLITE\nExportar Base de Dados", width=240, height=170, corner_radius=14,
+            fg_color=THEME["input_bg"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["card_border"], font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._executar_backup
+        ).pack(side="left", padx=15)
+
+        ctk.CTkButton(
+            center, text="☁\n\nSINCRONIZAÇÃO NUVEM\nBackup em Nuvem JSON", width=240, height=170, corner_radius=14,
+            fg_color=THEME["input_bg"], text_color=THEME["accent_emerald"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["card_border"], font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._sincronizar_nuvem_acao
+        ).pack(side="left", padx=15)
+
+        ctk.CTkButton(
+            center, text="📖\n\nSUPORTE & CONTACTO\nRobson Cadete", width=240, height=170, corner_radius=14,
+            fg_color=THEME["input_bg"], hover_color=THEME["btn_circle_add_hover"],
+            border_width=1, border_color=THEME["card_border"], font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._modal_sobre
+        ).pack(side="left", padx=15)
+
+        return root
+
+    def _modal_sobre(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("Suporte & Desenvolvedor")
+        modal.geometry("450x330")
+        modal.configure(fg_color=THEME["card_main"])
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="RECIBO SOFTWARE PRO v2.8", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["accent_blue"]).pack(pady=(22, 6))
+        
+        info = ctk.CTkFrame(modal, fg_color=THEME["input_bg"], corner_radius=12, border_width=1, border_color=THEME["card_border"])
+        info.pack(fill="x", padx=24, pady=16, ipady=8)
+
+        ctk.CTkLabel(info, text="Programador responsável:", font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).pack(pady=(4, 1))
+        ctk.CTkLabel(info, text="Robson Cadete", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["text_primary"]).pack()
+        ctk.CTkLabel(info, text="📞 Telefone / WhatsApp: (21) 97462-3033", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack(pady=(8, 2))
+        ctk.CTkLabel(info, text="✉️ E-mail: robson.cadete@gmail.com", font=ctk.CTkFont(size=12), text_color=THEME["text_primary"]).pack()
+
+        ctk.CTkButton(modal, text="Fechar", width=120, height=36, corner_radius=8, fg_color=THEME["accent_blue"], command=modal.destroy).pack(pady=8)
+
+    # ==============================================================================
+    # 4. VIEW RELATÓRIOS
+    # ==============================================================================
+    def _view_relatorios(self):
+        root = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        card = ctk.CTkFrame(root, fg_color=THEME["card_main"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
+        card.pack(fill="both", expand=True)
+
+        center = ctk.CTkFrame(card, fg_color="transparent")
+        center.pack(expand=True)
+
+        reports = [
+            ("🔄", "TODOS OS RECIBOS", None),
+            ("📤", "RECIBOS PAGAMENTO", "Pagamento"),
+            ("📥", "RECIBOS RECEBIMENTO", "Recebimento")
+        ]
+
+        for icon, title, filtro in reports:
+            ctk.CTkButton(
+                center, text=f"{icon}\n\n{title}", width=210, height=150, corner_radius=14,
+                fg_color=THEME["input_bg"], hover_color=THEME["btn_circle_add_hover"],
+                border_width=1, border_color=THEME["card_border"], font=ctk.CTkFont(size=13, weight="bold"),
+                command=lambda t=title, fil=filtro: self._modal_relatorio(t, fil)
+            ).pack(side="left", padx=14)
+
+        return root
+
+    def _modal_relatorio(self, rotulo, tipo_filtro):
+        modal = ctk.CTkToplevel(self)
+        modal.title(f"Relatório - {rotulo}")
+        modal.geometry("400x230")
+        modal.configure(fg_color=THEME["card_main"])
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text=f"Filtro: {rotulo}", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME["text_primary"]).pack(pady=(16, 12))
+
+        grid = ctk.CTkFrame(modal, fg_color="transparent")
+        grid.pack(pady=6)
+
+        ctk.CTkLabel(grid, text="Data Inicial", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_muted"]).grid(row=0, column=0, padx=8)
+        txt_i = ctk.CTkEntry(grid, width=120, height=36, fg_color=THEME["input_bg"])
+        txt_i.insert(0, "01/01/" + str(datetime.now().year))
+        txt_i.grid(row=1, column=0, padx=8, pady=(2, 0))
+
+        ctk.CTkLabel(grid, text="Data Final", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_muted"]).grid(row=0, column=1, padx=8)
+        txt_f = ctk.CTkEntry(grid, width=120, height=36, fg_color=THEME["input_bg"])
+        txt_f.insert(0, datetime.now().strftime("%d/%m/%Y"))
+        txt_f.grid(row=1, column=1, padx=8, pady=(2, 0))
+
+        def process():
+            di, df = txt_i.get().strip(), txt_f.get().strip()
+            try:
+                datetime.strptime(di, "%d/%m/%Y")
+                datetime.strptime(df, "%d/%m/%Y")
+            except ValueError:
+                messagebox.showerror("Erro", "Formato de data inválido. Utilize DD/MM/AAAA.")
+                return
+
+            q = "SELECT *, substr(data_recibo,7,4)||'-'||substr(data_recibo,4,2)||'-'||substr(data_recibo,1,2) as dt_iso FROM recibos WHERE dt_iso BETWEEN ? AND ?"
+            params = [datetime.strptime(di, "%d/%m/%Y").strftime("%Y-%m-%d"), datetime.strptime(df, "%d/%m/%Y").strftime("%Y-%m-%d")]
+            if tipo_filtro:
+                q += " AND tipo = ?"
+                params.append(tipo_filtro)
+            q += " ORDER BY id DESC"
+
+            with self.db.get_connection() as conn:
+                registros = conn.execute(q, params).fetchall()
+
+            if not registros:
+                messagebox.showinfo("Informação", "Nenhum recibo localizado para o período indicado.")
+                return
+
+            modal.destroy()
+            total = sum(r["valor"] for r in registros)
+            linhas = "".join([f"
