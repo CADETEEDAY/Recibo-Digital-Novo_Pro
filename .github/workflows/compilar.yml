@@ -25,7 +25,7 @@ jobs:
 
     - name: Gerar Executavel com PyInstaller
       run: |
-        pyinstaller --clean --noconsole --onefile --collect-all customtkinter --name="ReciboSoftware" app.py
+        pyinstaller --clean --noconsole --onefile --collect-all customtkinter --name="ReciboSoftware" main.py
 
     - name: Publicar Executavel
       uses: actions/upload-artifact@v4
